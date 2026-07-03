@@ -1,67 +1,63 @@
-name: Build aapt2 from Source (Fixed)
+name: Build aapt2 (Standalone CMake)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y repo git-core gnupg flex bison gperf build-essential \
-            zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
-            libncurses5-dev lib32z1-dev ccache libgl1-mesa-dev libxml2-utils \
-            xsltproc unzip python3
-
-      - name: Initialize AOSP Repo (Minimal)
-        run: |
-          mkdir aosp_src && cd aosp_src
-          repo init -u https://android.googlesource.com/platform/manifest -b master --depth=1
+          sudo apt-get install -y git-core gnupg flex bison gperf build-essential \
+                                  zip curl zlib1g-dev gcc-multilib g++-multilib \
+                                  libc6-dev-i386 libncurses5-dev lib32z1-dev \
+                                  ccache libgl1-mesa-dev libxml2-utils xsltproc unzip \
+                                  python3 python3-pip cmake ninja-build
           
-          # 创建 custom manifest 只拉取 aapt2 及其强依赖
-          cat > .repo/local_manifests/aapt2.xml <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest>
-            <project path="build/blueprint" name="platform/build/blueprint" />
-            <project path="build/soong" name="platform/build/soong" />
-            <project path="frameworks/base" name="platform/frameworks/base" />
-            <project path="system/core" name="platform/system/core" />
-            <project path="system/libbase" name="platform/system/libbase" />
-            <project path="external/protobuf" name="platform/external/protobuf" />
-            <project path="external/zlib" name="platform/external/zlib" />
-            <project path="external/libpng" name="platform/external/libpng" />
-          </manifest>
-          EOF
+          # 安装 Protobuf 编译器 (aapt2 必须)
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Clone Standalone aapt2 Source
+        run: |
+          # 使用一个专门修复了 CMake 构建的 aapt2 镜像源
+          # 这个源包含了所有必要的子模块，不需要 repo sync
+          git clone --recurse-submodules https://github.com/nicoboo/aapt2-cmake.git aapt2_src
           
-          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r21e # 使用兼容性最好的 r21e 版本
+          add-to-path: false
 
-      - name: Setup Build Environment
+      - name: Build aapt2 for ARM64
         run: |
-          cd aosp_src
-          source build/envsetup.sh
-          lunch aosp_arm64-eng
-
-      - name: Compile aapt2
-        run: |
-          cd aosp_src
-          # 使用 Soong 构建系统编译 aapt2
-          m aapt2 -j$(nproc --all)
-      
-      - name: Collect Binary
-        run: |
-          mkdir -p output
-          # 找到编译好的二进制文件并复制出来
-          find aosp_src/out -name "aapt2" -type f -exec cp {} output/ \;
-          ls -lh output/
+          cd aapt2_src
+          
+          # 创建构建目录
+          mkdir -p build && cd build
+          
+          # 配置 CMake
+          # 关键点：指定 Toolchain 为 NDK 的 android.toolchain.cmake
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-21 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAAPT2_STANDALONE=ON # 开启独立模式，静态链接依赖
+            
+          # 执行编译
+          ninja aapt2
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-aapt2
-          path: output/aapt2
+          name: aapt2-arm64-binary
+          path: aapt2_src/build/aapt2
