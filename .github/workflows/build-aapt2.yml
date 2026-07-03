@@ -1,7 +1,7 @@
-name: Build aapt2 ARM64 (Standalone)
+name: Build aapt2 ARM64 (Official Source Fix)
 
 on:
-  workflow_dispatch: # 允许手动触发构建
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
@@ -14,55 +14,80 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          # 安装基础编译工具、Git、Python3 以及 Protobuf 编译器
           sudo apt-get install -y git-core gnupg flex bison gperf build-essential \
                                   zip curl zlib1g-dev gcc-multilib g++-multilib \
                                   libc6-dev-i386 libncurses5-dev lib32z1-dev \
                                   ccache libgl1-mesa-dev libxml2-utils xsltproc unzip \
                                   python3 protobuf-compiler libprotobuf-dev
 
-      - name: Clone Standalone aapt2 Source
+      - name: Setup NDK
         run: |
-          # 使用一个包含完整 CMake 配置的独立 aapt2 镜像源
-          # 这个源解决了原生 AOSP 源码无法单独编译的问题
-          git clone --recurse-submodules https://github.com/niclab/aapt2.git aapt2_src
-
-      - name: Download & Setup NDK
-        run: |
-          # 下载适合编译最新 aapt2 的 NDK 版本 (r21e 兼容性较好)
+          # 下载 Android NDK r21e (兼容性最好，支持旧版 aapt2 构建)
           wget -q https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip
           unzip -q android-ndk-r21e-linux-x86_64.zip
-          
-          # 设置环境变量
           echo "NDK_HOME=$(pwd)/android-ndk-r21e" >> $GITHUB_ENV
-          echo "TOOLCHAIN=$(pwd)/android-ndk-r21e/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$(pwd)/android-ndk-r21e/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
 
-      - name: Configure CMake for ARM64
+      - name: Clone Official AOSP Sources
         run: |
-          mkdir -p aapt2_build
+          # 1. 创建目录结构
+          mkdir -p aapt2_build/frameworks/base/tools/aapt2
           cd aapt2_build
+
+          # 2. 克隆核心源码 (使用 depth=1 加速)
+          git clone --depth 1 https://android.googlesource.com/platform/frameworks/base frameworks/base
+          git clone --depth 1 https://android.googlesource.com/platform/system/libbase system/libbase
+          git clone --depth 1 https://android.googlesource.com/platform/system/core system/core
           
-          # 配置 CMake，指定目标架构为 aarch64 (ARM64)
+          # 3. 移动文件到预期位置 (为了简化路径)
+          mv frameworks/base/tools/aapt2 ./aapt2_src
+          
+          # 4. 【关键步骤】创建一个最小的 CMakeLists.txt 
+          # 因为官方源码没有 CMake 文件，我们需要手动告诉编译器怎么编译
+          cat > aapt2_src/CMakeLists.txt << 'EOF'
+          cmake_minimum_required(VERSION 3.10)
+          project(aapt2)
+
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+          # 设置头文件路径
+          include_directories(
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/libbase/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/core/libutils/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/core/libcutils/include
+          )
+
+          # 收集源文件
+          file(GLOB_RECURSE SRC_FILES "*.cpp")
+          
+          # 排除不需要的文件 (如果有)
+          list(FILTER SRC_FILES EXCLUDE REGEX ".*test.*")
+
+          add_executable(aapt2 ${SRC_FILES})
+
+          target_link_libraries(aapt2
+            z
+            log
+          )
+          EOF
+
+      - name: Build with CMake & NDK
+        run: |
+          cd aapt2_build
+          mkdir build && cd build
+          
           cmake ../aapt2_src \
-            -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN/build/cmake/android.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DProtobuf_PROTOC_EXECUTABLE=/usr/bin/protoc
-
-      - name: Compile aapt2
-        run: |
-          cd aapt2_build
-          # 使用多核并行编译
+            -DCMAKE_BUILD_TYPE=Release
+          
           make -j$(nproc)
-
-      - name: Verify Binary
-        run: |
-          file aapt2_build/aapt2
-          # 检查输出是否包含 "aarch64" 字样
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aapt2-arm64-v8a
-          path: aapt2_build/aapt2
+          name: aapt2-arm64-binary
+          path: aapt2_build/build/aapt2
