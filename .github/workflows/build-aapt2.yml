@@ -1,63 +1,41 @@
-name: Build aapt2 (Standalone CMake)
+name: Build Native ARM64 AAPT2
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch: # 允许在 GitHub 网页上手动触发
+  push:
+    branches: [ main ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-aapt2:
+    runs-on: ubuntu-latest  # 使用 GitHub 提供的 x86_64 服务器
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison gperf build-essential \
-                                  zip curl zlib1g-dev gcc-multilib g++-multilib \
-                                  libc6-dev-i386 libncurses5-dev lib32z1-dev \
-                                  ccache libgl1-mesa-dev libxml2-utils xsltproc unzip \
-                                  python3 python3-pip cmake ninja-build
-          
-          # 安装 Protobuf 编译器 (aapt2 必须)
-          sudo apt-get install -y protobuf-compiler
+          # 安装基础编译工具、zlib 以及 ARM64 交叉编译工具链
+          sudo apt-get install -y build-essential git libz-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Clone Standalone aapt2 Source
+      - name: Clone AOSP Base Repo
         run: |
-          # 使用一个专门修复了 CMake 构建的 aapt2 镜像源
-          # 这个源包含了所有必要的子模块，不需要 repo sync
-          git clone --recurse-submodules https://github.com/nicoboo/aapt2-cmake.git aapt2_src
-          
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r21e # 使用兼容性最好的 r21e 版本
-          add-to-path: false
+          # 浅克隆以节省时间和空间
+          git clone --depth 1 https://android.googlesource.com/platform/frameworks/base
+          cd base
 
-      - name: Build aapt2 for ARM64
+      - name: Cross-Compile AAPT2 for ARM64
         run: |
-          cd aapt2_src
-          
-          # 创建构建目录
-          mkdir -p build && cd build
-          
-          # 配置 CMake
-          # 关键点：指定 Toolchain 为 NDK 的 android.toolchain.cmake
-          cmake .. \
-            -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-21 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DAAPT2_STANDALONE=ON # 开启独立模式，静态链接依赖
-            
-          # 执行编译
-          ninja aapt2
+          cd base
+          # 指定交叉编译器环境变量，并执行编译
+          export CC=aarch64-linux-gnu-gcc
+          export CXX=aarch64-linux-gnu-g++
+          make aapt2 -j$(nproc)
 
-      - name: Upload Artifact
+      - name: Upload ARM64 AAPT2 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aapt2-arm64-binary
-          path: aapt2_src/build/aapt2
+          name: aapt2-linux-arm64
+          path: base/out/host/linux-arm64/bin/aapt2
