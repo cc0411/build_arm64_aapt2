@@ -1,93 +1,67 @@
-name: Build aapt2 ARM64 (Official Source Fix)
+name: Build aapt2 from Source (Fixed)
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison gperf build-essential \
-                                  zip curl zlib1g-dev gcc-multilib g++-multilib \
-                                  libc6-dev-i386 libncurses5-dev lib32z1-dev \
-                                  ccache libgl1-mesa-dev libxml2-utils xsltproc unzip \
-                                  python3 protobuf-compiler libprotobuf-dev
+          sudo apt-get install -y repo git-core gnupg flex bison gperf build-essential \
+            zip curl zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 \
+            libncurses5-dev lib32z1-dev ccache libgl1-mesa-dev libxml2-utils \
+            xsltproc unzip python3
 
-      - name: Setup NDK
+      - name: Initialize AOSP Repo (Minimal)
         run: |
-          # 下载 Android NDK r21e (兼容性最好，支持旧版 aapt2 构建)
-          wget -q https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip
-          unzip -q android-ndk-r21e-linux-x86_64.zip
-          echo "NDK_HOME=$(pwd)/android-ndk-r21e" >> $GITHUB_ENV
-          echo "TOOLCHAIN=$(pwd)/android-ndk-r21e/build/cmake/android.toolchain.cmake" >> $GITHUB_ENV
-
-      - name: Clone Official AOSP Sources
-        run: |
-          # 1. 创建目录结构
-          mkdir -p aapt2_build/frameworks/base/tools/aapt2
-          cd aapt2_build
-
-          # 2. 克隆核心源码 (使用 depth=1 加速)
-          git clone --depth 1 https://android.googlesource.com/platform/frameworks/base frameworks/base
-          git clone --depth 1 https://android.googlesource.com/platform/system/libbase system/libbase
-          git clone --depth 1 https://android.googlesource.com/platform/system/core system/core
+          mkdir aosp_src && cd aosp_src
+          repo init -u https://android.googlesource.com/platform/manifest -b master --depth=1
           
-          # 3. 移动文件到预期位置 (为了简化路径)
-          mv frameworks/base/tools/aapt2 ./aapt2_src
-          
-          # 4. 【关键步骤】创建一个最小的 CMakeLists.txt 
-          # 因为官方源码没有 CMake 文件，我们需要手动告诉编译器怎么编译
-          cat > aapt2_src/CMakeLists.txt << 'EOF'
-          cmake_minimum_required(VERSION 3.10)
-          project(aapt2)
-
-          set(CMAKE_CXX_STANDARD 17)
-          set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-          # 设置头文件路径
-          include_directories(
-            ${CMAKE_CURRENT_SOURCE_DIR}
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/libbase/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/core/libutils/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../system/core/libcutils/include
-          )
-
-          # 收集源文件
-          file(GLOB_RECURSE SRC_FILES "*.cpp")
-          
-          # 排除不需要的文件 (如果有)
-          list(FILTER SRC_FILES EXCLUDE REGEX ".*test.*")
-
-          add_executable(aapt2 ${SRC_FILES})
-
-          target_link_libraries(aapt2
-            z
-            log
-          )
+          # 创建 custom manifest 只拉取 aapt2 及其强依赖
+          cat > .repo/local_manifests/aapt2.xml <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project path="build/blueprint" name="platform/build/blueprint" />
+            <project path="build/soong" name="platform/build/soong" />
+            <project path="frameworks/base" name="platform/frameworks/base" />
+            <project path="system/core" name="platform/system/core" />
+            <project path="system/libbase" name="platform/system/libbase" />
+            <project path="external/protobuf" name="platform/external/protobuf" />
+            <project path="external/zlib" name="platform/external/zlib" />
+            <project path="external/libpng" name="platform/external/libpng" />
+          </manifest>
           EOF
+          
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle
 
-      - name: Build with CMake & NDK
+      - name: Setup Build Environment
         run: |
-          cd aapt2_build
-          mkdir build && cd build
-          
-          cmake ../aapt2_src \
-            -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-29 \
-            -DCMAKE_BUILD_TYPE=Release
-          
-          make -j$(nproc)
+          cd aosp_src
+          source build/envsetup.sh
+          lunch aosp_arm64-eng
+
+      - name: Compile aapt2
+        run: |
+          cd aosp_src
+          # 使用 Soong 构建系统编译 aapt2
+          m aapt2 -j$(nproc --all)
+      
+      - name: Collect Binary
+        run: |
+          mkdir -p output
+          # 找到编译好的二进制文件并复制出来
+          find aosp_src/out -name "aapt2" -type f -exec cp {} output/ \;
+          ls -lh output/
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aapt2-arm64-binary
-          path: aapt2_build/build/aapt2
+          name: compiled-aapt2
+          path: output/aapt2
